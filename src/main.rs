@@ -1,4 +1,4 @@
-use tracing::info;
+use tracing::{info, error};
 use tracing_subscriber;
 
 mod config;
@@ -11,8 +11,11 @@ async fn main() {
     // Setup logging
     tracing_subscriber::fmt::init();
     
-    info!("🦀 Starting Ritcher - Rust HLS Stitcher");
+    info!("🚀 Starting Ritcher - Rust HLS Stitcher");
     
     // Start HTTP server
-    server::start().await;
+    if let Err(e) = server::start().await {
+      error!("Failed to start server: {}", e);
+      std::process::exit(1);
+    }
 }
