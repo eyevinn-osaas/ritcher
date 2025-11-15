@@ -2,12 +2,14 @@ use crate::config::Config;
 use axum::{
     routing::get,
     Router,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     response::IntoResponse,
     http::StatusCode,
 };
 use tracing::{info, error};
 use crate::stitcher::parser;
+use std::collections::HashMap;
+use reqwest;
 
 pub async fn start(config: Config) -> Result<(), Box<dyn std::error::Error>> {
   let addr = format!("0.0.0.0:{}", config.port);
@@ -39,15 +41,35 @@ async fn health_check() -> &'static str {
     "🦀 Ritcher is running!"
 }
 
-async fn serve_playlist(Path(session_id): Path<String>, State(config): State<Config>) -> impl IntoResponse {
+async fn serve_playlist(
+  Path(session_id): Path<String>,
+  Query(params): Query<HashMap<String, String>>,
+  State(config): State<Config>
+) -> impl IntoResponse {
   info!("Serving playlist for session: {}", session_id);
 
-  // for now: read test file
-  let content = match std::fs::read_to_string("test-data/sample_playlist.m3u8") {
-    Ok(c) => c,
+  let origin_url = params.get("origin").map(|s| s.as_str()).unwrap_or(&config.origin_url);
+
+  info!("fetching playlist from origin: {}", origin_url);
+
+  let content = match reqwest::get(origin_url).await {
+    Ok(response) => {
+      if response.status().is_success() {
+        match response.text().await {
+          Ok(text) => text,
+          Err(e) => {
+            error!("Failed to read response text: {:?}", e);
+            return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to read response text".to_string());
+          }
+        }
+      } else {
+        error!("origin server returned error: {}", response.status());
+        return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to fetch playlist".to_string());
+      }
+    }
     Err(e) => {
-      error!("Failed to read file: {:?}", e);
-      return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to read file".to_string());
+      error!("Failed to fetch playlist from origin: {:?}", e);
+      return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to fetch playlist from origin".to_string());
     }
   };
 
