@@ -22,11 +22,19 @@ pub fn parse_hls_playlist(content: &str) -> Result<Playlist> {
 ///
 /// This function ONLY handles URL rewriting for content segments.
 /// Ad insertion is handled separately by the ad interleaver.
+///
+/// For segments with absolute URLs (starting with http), the origin is
+/// derived from the segment's own URL. For relative URLs, the provided
+/// origin_base is used as the origin.
+///
+/// Note: URLs with query parameters are currently not handled specially.
+/// The query string will be included in the segment name passed to the
+/// segment handler.
 pub fn rewrite_content_urls(
     mut playlist: Playlist,
     session_id: &str,
     base_url: &str,
-    origin_url: &str,
+    origin_base: &str,
 ) -> Result<Playlist> {
     info!("Rewriting content URLs for session: {}", session_id);
 
@@ -39,18 +47,24 @@ pub fn rewrite_content_urls(
 
             info!("Rewriting segment URL: {}", segment.uri);
 
-            // Extract segment name from URL
-            let segment_name = if segment.uri.starts_with("http") {
-                segment.uri.split('/').next_back().unwrap_or(&segment.uri)
-            } else {
-                &segment.uri
-            };
+            if segment.uri.starts_with("http") {
+                // Absolute URL: derive origin from the segment's own URL
+                let (seg_origin, segment_name) = segment
+                    .uri
+                    .rsplit_once('/')
+                    .unwrap_or(("", &segment.uri));
 
-            // Rewrite to proxy through stitcher
-            segment.uri = format!(
-                "{}/stitch/{}/segment/{}?origin={}",
-                base_url, session_id, segment_name, origin_url
-            );
+                segment.uri = format!(
+                    "{}/stitch/{}/segment/{}?origin={}",
+                    base_url, session_id, segment_name, seg_origin
+                );
+            } else {
+                // Relative URL: use the provided origin base
+                segment.uri = format!(
+                    "{}/stitch/{}/segment/{}?origin={}",
+                    base_url, session_id, segment.uri, origin_base
+                );
+            }
         }
     }
 

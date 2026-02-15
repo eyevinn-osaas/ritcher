@@ -1,4 +1,4 @@
-use m3u8_rs::{MediaPlaylist, MediaSegment};
+use m3u8_rs::MediaPlaylist;
 use tracing::{debug, info};
 
 /// Represents an ad break detected from CUE tags in the playlist
@@ -20,6 +20,9 @@ pub struct AdBreak {
 /// - `#EXT-X-CUE-OUT-CONT:{elapsed}/{duration}` — mid-break continuation
 /// - `#EXT-X-CUE-IN` — ad break end
 ///
+/// Note: m3u8-rs strips the `#EXT-` prefix from unknown tags, so the tag
+/// field contains e.g. `X-CUE-OUT` (not `EXT-X-CUE-OUT`).
+///
 /// Returns a vector of AdBreak structs with start/end indices and duration.
 pub fn detect_ad_breaks(playlist: &MediaPlaylist) -> Vec<AdBreak> {
     let mut ad_breaks = Vec::new();
@@ -28,20 +31,9 @@ pub fn detect_ad_breaks(playlist: &MediaPlaylist) -> Vec<AdBreak> {
     for (index, segment) in playlist.segments.iter().enumerate() {
         // Check unknown_tags for CUE markers
         for tag in &segment.unknown_tags {
-            let tag_str = format!("{}:{}", tag.tag, tag.rest.as_deref().unwrap_or(""));
-
-            if let Some(cue_out_duration) = parse_cue_out(&tag_str) {
-                // CUE-OUT detected - start of ad break
-                info!(
-                    "Detected CUE-OUT at segment #{}: duration {}s",
-                    index, cue_out_duration
-                );
-
-                if current_break.is_none() {
-                    current_break = Some((index, cue_out_duration));
-                }
-            } else if tag_str.contains("EXT-X-CUE-IN") || tag_str.contains("EXT-CUE-IN") {
-                // CUE-IN detected - end of ad break
+            // Match against tag name directly (m3u8-rs strips #EXT- prefix)
+            // CUE-IN: tag.tag is "X-CUE-IN", rest is None
+            if is_cue_in(&tag.tag) {
                 if let Some((start_idx, duration)) = current_break.take() {
                     info!("Detected CUE-IN at segment #{}", index);
                     ad_breaks.push(AdBreak {
@@ -50,10 +42,20 @@ pub fn detect_ad_breaks(playlist: &MediaPlaylist) -> Vec<AdBreak> {
                         duration,
                     });
                 }
-            } else if tag_str.contains("EXT-X-CUE-OUT-CONT") {
-                // CUE-OUT-CONT detected - continuation of ad break
+            }
+            // CUE-OUT-CONT: tag.tag is "X-CUE-OUT-CONT", rest is e.g. "10/30"
+            else if is_cue_out_cont(&tag.tag) {
                 debug!("Detected CUE-OUT-CONT at segment #{}", index);
-                // Don't need to do anything special, just indicates we're still in the break
+            }
+            // CUE-OUT: tag.tag is "X-CUE-OUT", rest is e.g. "30" or "DURATION=30"
+            else if let Some(duration) = parse_cue_out(&tag.tag, tag.rest.as_deref()) {
+                info!(
+                    "Detected CUE-OUT at segment #{}: duration {}s",
+                    index, duration
+                );
+                if current_break.is_none() {
+                    current_break = Some((index, duration));
+                }
             }
         }
     }
@@ -74,35 +76,45 @@ pub fn detect_ad_breaks(playlist: &MediaPlaylist) -> Vec<AdBreak> {
     ad_breaks
 }
 
+/// Check if a tag name represents CUE-IN
+///
+/// m3u8-rs strips `#EXT-` so we check for `X-CUE-IN` and `CUE-IN`
+fn is_cue_in(tag_name: &str) -> bool {
+    tag_name == "X-CUE-IN" || tag_name == "CUE-IN"
+}
+
+/// Check if a tag name represents CUE-OUT-CONT
+fn is_cue_out_cont(tag_name: &str) -> bool {
+    tag_name == "X-CUE-OUT-CONT" || tag_name == "CUE-OUT-CONT"
+}
+
 /// Parse CUE-OUT tag to extract duration
 ///
+/// m3u8-rs splits unknown tags into `tag` (the name) and `rest` (after the colon).
+///
 /// Supports formats:
-/// - `#EXT-X-CUE-OUT:30` → 30.0
-/// - `#EXT-X-CUE-OUT:DURATION=30` → 30.0
-/// - `#EXT-CUE-OUT:30` → 30.0 (legacy format)
-fn parse_cue_out(tag: &str) -> Option<f32> {
-    if !tag.contains("CUE-OUT") || tag.contains("CUE-OUT-CONT") {
+/// - tag="X-CUE-OUT", rest=Some("30") → 30.0
+/// - tag="X-CUE-OUT", rest=Some("DURATION=30") → 30.0
+/// - tag="CUE-OUT", rest=Some("30") → 30.0 (legacy format)
+fn parse_cue_out(tag_name: &str, rest: Option<&str>) -> Option<f32> {
+    // Must be CUE-OUT but not CUE-OUT-CONT
+    if !(tag_name == "X-CUE-OUT" || tag_name == "CUE-OUT") {
         return None;
     }
 
-    // Try to extract duration from various formats
-    if let Some(colon_pos) = tag.rfind(':') {
-        let after_colon = &tag[colon_pos + 1..];
+    let rest = rest?;
 
-        // Handle "DURATION=30" format
-        if after_colon.contains("DURATION=")
-            && let Some(eq_pos) = after_colon.find('=')
-        {
-            let duration_str = &after_colon[eq_pos + 1..];
-            if let Ok(duration) = duration_str.trim().parse::<f32>() {
-                return Some(duration);
-            }
-        }
-
-        // Handle simple "30" format
-        if let Ok(duration) = after_colon.trim().parse::<f32>() {
+    // Handle "DURATION=30" format
+    if let Some(eq_pos) = rest.find('=') {
+        let duration_str = &rest[eq_pos + 1..];
+        if let Ok(duration) = duration_str.trim().parse::<f32>() {
             return Some(duration);
         }
+    }
+
+    // Handle simple "30" format
+    if let Ok(duration) = rest.trim().parse::<f32>() {
+        return Some(duration);
     }
 
     None
@@ -118,7 +130,22 @@ pub fn is_in_ad_break(segment_index: usize, ad_breaks: &[AdBreak]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use m3u8_rs::ExtTag;
+    use m3u8_rs::{ExtTag, MediaSegment};
+
+    fn create_segment(uri: &str) -> MediaSegment {
+        MediaSegment {
+            uri: uri.to_string(),
+            duration: 10.0,
+            title: None,
+            byte_range: None,
+            discontinuity: false,
+            key: None,
+            map: None,
+            program_date_time: None,
+            daterange: None,
+            unknown_tags: Vec::new(),
+        }
+    }
 
     fn create_segment_with_tag(tag: &str, rest: Option<&str>) -> MediaSegment {
         MediaSegment {
@@ -140,38 +167,54 @@ mod tests {
 
     #[test]
     fn test_parse_cue_out_simple() {
-        assert_eq!(parse_cue_out("#EXT-X-CUE-OUT:30"), Some(30.0));
-        assert_eq!(parse_cue_out("#EXT-X-CUE-OUT:60.5"), Some(60.5));
+        assert_eq!(parse_cue_out("X-CUE-OUT", Some("30")), Some(30.0));
+        assert_eq!(parse_cue_out("X-CUE-OUT", Some("60.5")), Some(60.5));
     }
 
     #[test]
     fn test_parse_cue_out_with_duration_key() {
-        assert_eq!(parse_cue_out("#EXT-X-CUE-OUT:DURATION=30"), Some(30.0));
-        assert_eq!(parse_cue_out("#EXT-X-CUE-OUT:DURATION=45.5"), Some(45.5));
+        assert_eq!(
+            parse_cue_out("X-CUE-OUT", Some("DURATION=30")),
+            Some(30.0)
+        );
+        assert_eq!(
+            parse_cue_out("X-CUE-OUT", Some("DURATION=45.5")),
+            Some(45.5)
+        );
     }
 
     #[test]
     fn test_parse_cue_out_legacy() {
-        assert_eq!(parse_cue_out("#EXT-CUE-OUT:30"), Some(30.0));
+        assert_eq!(parse_cue_out("CUE-OUT", Some("30")), Some(30.0));
     }
 
     #[test]
     fn test_parse_cue_out_invalid() {
-        assert_eq!(parse_cue_out("#EXT-X-CUE-OUT-CONT"), None);
-        assert_eq!(parse_cue_out("#EXT-X-CUE-IN"), None);
-        assert_eq!(parse_cue_out("#EXT-X-CUE-OUT:invalid"), None);
+        assert_eq!(parse_cue_out("X-CUE-OUT-CONT", Some("10/30")), None);
+        assert_eq!(parse_cue_out("X-CUE-IN", None), None);
+        assert_eq!(parse_cue_out("X-CUE-OUT", Some("invalid")), None);
+        assert_eq!(parse_cue_out("X-CUE-OUT", None), None);
+    }
+
+    #[test]
+    fn test_is_cue_in() {
+        assert!(is_cue_in("X-CUE-IN"));
+        assert!(is_cue_in("CUE-IN"));
+        assert!(!is_cue_in("X-CUE-OUT"));
+        assert!(!is_cue_in("SOMETHING"));
     }
 
     #[test]
     fn test_detect_ad_breaks_simple() {
+        // Use tag names as m3u8-rs stores them (without #EXT- prefix)
         let mut playlist = MediaPlaylist::default();
         playlist.segments = vec![
-            create_segment_with_tag("SOMETHING", None),
-            create_segment_with_tag("EXT-X-CUE-OUT", Some("30")),
-            create_segment_with_tag("SOMETHING", None),
-            create_segment_with_tag("SOMETHING", None),
-            create_segment_with_tag("EXT-X-CUE-IN", None),
-            create_segment_with_tag("SOMETHING", None),
+            create_segment("seg0.ts"),
+            create_segment_with_tag("X-CUE-OUT", Some("30")),
+            create_segment("seg2.ts"),
+            create_segment("seg3.ts"),
+            create_segment_with_tag("X-CUE-IN", None),
+            create_segment("seg5.ts"),
         ];
 
         let ad_breaks = detect_ad_breaks(&playlist);
@@ -191,14 +234,14 @@ mod tests {
     fn test_detect_multiple_ad_breaks() {
         let mut playlist = MediaPlaylist::default();
         playlist.segments = vec![
-            create_segment_with_tag("SOMETHING", None),
-            create_segment_with_tag("EXT-X-CUE-OUT", Some("30")),
-            create_segment_with_tag("SOMETHING", None),
-            create_segment_with_tag("EXT-X-CUE-IN", None),
-            create_segment_with_tag("SOMETHING", None),
-            create_segment_with_tag("EXT-X-CUE-OUT", Some("60")),
-            create_segment_with_tag("SOMETHING", None),
-            create_segment_with_tag("EXT-X-CUE-IN", None),
+            create_segment("seg0.ts"),
+            create_segment_with_tag("X-CUE-OUT", Some("30")),
+            create_segment("seg2.ts"),
+            create_segment_with_tag("X-CUE-IN", None),
+            create_segment("seg4.ts"),
+            create_segment_with_tag("X-CUE-OUT", Some("60")),
+            create_segment("seg6.ts"),
+            create_segment_with_tag("X-CUE-IN", None),
         ];
 
         let ad_breaks = detect_ad_breaks(&playlist);
@@ -216,9 +259,9 @@ mod tests {
     fn test_detect_unclosed_ad_break() {
         let mut playlist = MediaPlaylist::default();
         playlist.segments = vec![
-            create_segment_with_tag("SOMETHING", None),
-            create_segment_with_tag("EXT-X-CUE-OUT", Some("30")),
-            create_segment_with_tag("SOMETHING", None),
+            create_segment("seg0.ts"),
+            create_segment_with_tag("X-CUE-OUT", Some("30")),
+            create_segment("seg2.ts"),
         ];
 
         let ad_breaks = detect_ad_breaks(&playlist);
@@ -226,6 +269,27 @@ mod tests {
         assert_eq!(ad_breaks.len(), 1);
         assert_eq!(ad_breaks[0].start_index, 1);
         assert_eq!(ad_breaks[0].end_index, 3);
+    }
+
+    #[test]
+    fn test_detect_with_cue_out_cont() {
+        // Simulate what m3u8-rs actually produces from a real playlist
+        let mut playlist = MediaPlaylist::default();
+        playlist.segments = vec![
+            create_segment("seg0.ts"),
+            create_segment_with_tag("X-CUE-OUT", Some("30")),
+            create_segment_with_tag("X-CUE-OUT-CONT", Some("10/30")),
+            create_segment_with_tag("X-CUE-OUT-CONT", Some("20/30")),
+            create_segment_with_tag("X-CUE-IN", None),
+            create_segment("seg5.ts"),
+        ];
+
+        let ad_breaks = detect_ad_breaks(&playlist);
+
+        assert_eq!(ad_breaks.len(), 1);
+        assert_eq!(ad_breaks[0].start_index, 1);
+        assert_eq!(ad_breaks[0].end_index, 4);
+        assert_eq!(ad_breaks[0].duration, 30.0);
     }
 
     #[test]

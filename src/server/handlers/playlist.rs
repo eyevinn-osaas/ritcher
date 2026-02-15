@@ -79,42 +79,35 @@ fn process_playlist(
     ad_provider: &dyn AdProvider,
 ) -> Result<Playlist> {
     // Only process MediaPlaylist (not MasterPlaylist)
-    let mut playlist = if let Playlist::MediaPlaylist(media_playlist) = playlist {
-        Playlist::MediaPlaylist(media_playlist)
-    } else {
+    let Playlist::MediaPlaylist(mut media_playlist) = playlist else {
         return Ok(playlist);
     };
 
     // Step 1: Detect ad breaks from CUE tags
-    if let Playlist::MediaPlaylist(ref media_playlist) = playlist {
-        let ad_breaks = cue::detect_ad_breaks(media_playlist);
+    let ad_breaks = cue::detect_ad_breaks(&media_playlist);
 
-        if !ad_breaks.is_empty() {
-            info!("Detected {} ad break(s)", ad_breaks.len());
+    if !ad_breaks.is_empty() {
+        info!("Detected {} ad break(s)", ad_breaks.len());
 
-            // Step 2: Get ad segments for each break
-            let ad_segments_per_break: Vec<_> = ad_breaks
-                .iter()
-                .map(|ad_break| ad_provider.get_ad_segments(ad_break.duration, session_id))
-                .collect();
+        // Step 2: Get ad segments for each break
+        let ad_segments_per_break: Vec<_> = ad_breaks
+            .iter()
+            .map(|ad_break| ad_provider.get_ad_segments(ad_break.duration, session_id))
+            .collect();
 
-            // Step 3: Interleave ads into playlist
-            if let Playlist::MediaPlaylist(media_playlist) = playlist {
-                playlist = Playlist::MediaPlaylist(interleaver::interleave_ads(
-                    media_playlist,
-                    &ad_breaks,
-                    &ad_segments_per_break,
-                    session_id,
-                    base_url,
-                ));
-            }
-        } else {
-            info!("No ad breaks detected in playlist");
-        }
+        // Step 3: Interleave ads into playlist
+        media_playlist = interleaver::interleave_ads(
+            media_playlist,
+            &ad_breaks,
+            &ad_segments_per_break,
+            session_id,
+            base_url,
+        );
+    } else {
+        info!("No ad breaks detected in playlist");
     }
 
     // Step 4: Rewrite content URLs to proxy through stitcher
-    playlist = parser::rewrite_content_urls(playlist, session_id, base_url, origin_base)?;
-
-    Ok(playlist)
+    let playlist = Playlist::MediaPlaylist(media_playlist);
+    parser::rewrite_content_urls(playlist, session_id, base_url, origin_base)
 }
