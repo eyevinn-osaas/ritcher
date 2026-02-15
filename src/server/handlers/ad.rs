@@ -1,4 +1,4 @@
-use crate::{ad::AdProvider, error::Result, server::state::AppState};
+use crate::{error::Result, server::state::AppState};
 use axum::{
     body::Body,
     extract::{Path, State},

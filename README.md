@@ -1,229 +1,199 @@
-# 🦀 Ritcher
+# Ritcher
 
-## Rust-based HLS Stitcher for Server-Side Ad Insertion (SSAI)
+## Open-Source Live SSAI Stitcher
 
-Ritcher is a high-performance HLS stitcher built in Rust that enables seamless server-side ad insertion in live and VOD streams.
+Ritcher is a high-performance HLS stitcher built in Rust for Server-Side Ad Insertion (SSAI). It sits between the origin CDN and the player, dynamically inserting ads into live and VOD HLS streams by manipulating manifests and proxying segments.
 
----
-
-## ✨ Current Features
-
-- ⚡ **HLS Playlist Parsing** - Full support for media playlists using m3u8-rs
-- 🔄 **URL Rewriting** - Dynamic segment URL modification for stitching
-- 🚀 **Segment Proxying** - High-performance video segment delivery
-- 💾 **Session Management** - Per-session origin URL tracking
-- 🔧 **Environment-Based Config** - DEV/PROD mode with flexible configuration
-- 📊 **Structured Logging** - Comprehensive tracing with tracing-subscriber
-- 🛡️ **Production-Ready Error Handling** - Graceful error responses
+Designed to fill the gap in the [Eyevinn Open Source Cloud](https://www.osaas.io) ecosystem as a standalone live SSAI service downstream of [Channel Engine](https://github.com/Eyevinn/channel-engine).
 
 ---
 
-## 🏗️ Architecture
+## Features
 
-```bash
-Player Request → Ritcher → Modified HLS Playlist
-                   ↓
-          [Origin CDN + Proxying]
+- **SCTE-35 CUE tag detection** — Detects `EXT-X-CUE-OUT`, `EXT-X-CUE-IN`, and `EXT-X-CUE-OUT-CONT` markers in HLS playlists
+- **VAST ad provider** — Fetches and parses VAST 2.0/3.0/4.0 XML from any ad server, with wrapper chain support
+- **Static ad provider** — Built-in provider for testing with pre-configured ad segments
+- **Ad interleaving** — Replaces content segments in ad break windows with ad segments, including proper `EXT-X-DISCONTINUITY` tags
+- **Segment proxying** — High-performance proxying for both content and ad segments
+- **Session management** — Per-session stitching with automatic TTL-based cleanup
+- **Demo endpoint** — Synthetic HLS playlist with real Mux test segments and CUE markers for testing
+- **JSON health check** — Structured diagnostics with version, session count, and uptime
+- **CORS support** — Permissive in dev mode, restrictive in production
+
+---
+
+## Architecture
+
+```
+                    +------------------+
+  Player  -------->|     Ritcher      |
+                    |                  |
+                    |  1. Fetch playlist from origin
+                    |  2. Detect SCTE-35 CUE breaks
+                    |  3. Fetch ads from VAST endpoint
+                    |  4. Interleave ad segments
+                    |  5. Rewrite URLs through proxy
+                    |  6. Serve modified playlist
+                    +--------+---------+
+                             |
+              +--------------+--------------+
+              |                             |
+        Origin CDN                    Ad Server
+     (content segments)            (VAST endpoint)
 ```
 
-### How It Works
-
-1. **Player requests playlist** with origin URL parameter
-2. **Ritcher fetches** original playlist from origin CDN
-3. **Parser modifies** segment URLs to route through Ritcher
-4. **Player requests segments** through Ritcher
-5. **Ritcher proxies** segments from origin to player
-
 ---
 
-## 🚀 Getting Started
+## Quick Start
 
 ### Prerequisites
 
-- Rust 1.70+ (uses 2024 edition)
-- Cargo
+- Rust stable (edition 2024)
 
-### Installation
-
-```bash
-# Clone the repository
-git clone https://github.com/JoeldelPilar/ritcher.git
-cd ritcher
-
-# Build
-cargo build --release
-```
-
-### Running in Development
+### Development Mode
 
 ```bash
-# Start server with default dev config
+# Start with built-in demo and static ad provider
 DEV_MODE=true cargo run
 
-# Custom port
-DEV_MODE=true PORT=8080 cargo run
+# Demo playlist (raw, no stitching):
+# http://localhost:3000/demo/playlist.m3u8
 
-# Custom base URL
-DEV_MODE=true BASE_URL=http://localhost:8080 cargo run
+# Stitched demo (with ad insertion):
+# http://localhost:3000/stitch/demo/playlist.m3u8?origin=http://localhost:3000/demo/playlist.m3u8
 ```
 
-### Running in Production
+### With VAST Ad Server
 
 ```bash
-# All env vars required in production
+# Using Eyevinn test-adserver (or any VAST-compatible ad server)
+DEV_MODE=true \
+VAST_ENDPOINT="http://localhost:8080/api/v1/vast?dur=[DURATION]" \
+cargo run
+```
+
+### Production
+
+```bash
 PORT=3000 \
 BASE_URL=https://stitcher.example.com \
-ORIGIN_URL=https://cdn.example.com \
+ORIGIN_URL=https://cdn.example.com/stream/playlist.m3u8 \
+VAST_ENDPOINT=https://ads.example.com/vast \
 cargo run --release
 ```
 
 ---
 
-## 📡 API Endpoints
+## API Endpoints
 
-### Health Check
-
-```bash
-GET /health
-```
-
-### Serve Modified Playlist
-
-```bash
-GET /stitch/{session_id}/playlist.m3u8?origin={origin_playlist_url}
-```
-
-**Example:**
-
-```bash
-curl "http://localhost:3000/stitch/abc123/playlist.m3u8?origin=https://test-streams.mux.dev/x36xhzz/url_0/193039199_mp4_h264_aac_hd_7.m3u8"
-```
-
-### Proxy Video Segment
-
-```bash
-GET /stitch/{session_id}/segment/*segment_path?origin={origin_base_url}
-```
-
-**Note:** Segment requests are automatically generated by the player from the modified playlist.
+| Endpoint | Description |
+|----------|-------------|
+| `GET /health` | JSON health check (`{ status, version, active_sessions, uptime_seconds }`) |
+| `GET /demo/playlist.m3u8` | Demo HLS playlist with CUE markers |
+| `GET /stitch/{session_id}/playlist.m3u8?origin={url}` | Stitched playlist with ad insertion |
+| `GET /stitch/{session_id}/segment/{*path}?origin={base}` | Proxied content segment |
+| `GET /stitch/{session_id}/ad/{ad_name}` | Proxied ad segment |
 
 ---
 
-## 🛠️ Tech Stack
+## Configuration
 
-- **Language:** Rust 🦀 (Edition 2024)
-- **HTTP Server:** Axum 0.8
-- **Async Runtime:** Tokio 1.42
-- **HLS Parser:** m3u8-rs 6.0
-- **HTTP Client:** reqwest 0.12
-- **Logging:** tracing + tracing-subscriber
-- **Serialization:** serde + serde_json
+| Variable | Description | Required | Default |
+|----------|-------------|----------|---------|
+| `DEV_MODE` | Enable dev mode with defaults | No | `false` |
+| `PORT` | Server port | Prod only | `3000` |
+| `BASE_URL` | Stitcher's public URL | Prod only | `http://localhost:3000` |
+| `ORIGIN_URL` | Default origin playlist URL | Prod only | — |
+| `AD_PROVIDER_TYPE` | `vast`, `static`, or `auto` | No | `auto` |
+| `VAST_ENDPOINT` | VAST ad server URL | For VAST mode | — |
+| `AD_SOURCE_URL` | Static ad segment source | For static mode | tedm.io test stream |
+| `AD_SEGMENT_DURATION` | Static ad segment duration (seconds) | No | `1.0` |
 
----
-
-## ⚙️ Configuration
-
-### Environment Variables
-
-| Variable | Description | Required | Default (DEV mode) |
-|----------|-------------|----------|-------------------|
-| `DEV_MODE` | Enable development mode | No | `false` |
-| `PORT` | Server port | Production only | `3000` |
-| `BASE_URL` | Stitcher's public URL | Production only | `http://localhost:3000` |
-| `ORIGIN_URL` | Default origin CDN URL | Production only | `https://example.com` |
+**Auto-detection**: When `AD_PROVIDER_TYPE=auto` (default), Ritcher uses VAST if `VAST_ENDPOINT` is set, otherwise falls back to static.
 
 ---
 
-## 🧪 Testing with Real Streams
+## Tech Stack
 
-### Using Mux Test Streams
+- **Rust** (Edition 2024) — Zero-cost abstractions for manifest-per-viewer scalability
+- **Axum 0.8** — Async HTTP server
+- **Tokio** — Async runtime
+- **m3u8-rs 6.0** — HLS playlist parsing
+- **quick-xml** — VAST XML parsing
+- **reqwest** — HTTP client with connection pooling
+- **DashMap** — Lock-free concurrent session storage
+- **tower-http** — CORS middleware
+- **tracing** — Structured logging
+
+---
+
+## Testing
 
 ```bash
-# Start server
-DEV_MODE=true cargo run
+# Run all tests (30 tests)
+cargo test
 
-# Request modified playlist
-curl "http://localhost:3000/stitch/test123/playlist.m3u8?origin=https://test-streams.mux.dev/x36xhzz/url_0/193039199_mp4_h264_aac_hd_7.m3u8"
+# Run with logging
+RUST_LOG=debug cargo test
 
-# Download a segment
-curl "http://localhost:3000/stitch/test123/segment/url_462/193039199_mp4_h264_aac_hd_7.ts?origin=https://test-streams.mux.dev/x36xhzz/url_0" -o test.ts
-
-# Verify segment
-ffprobe test.ts
+# Clippy
+cargo clippy
 ```
 
 ---
 
-## 📋 Roadmap
+## Roadmap
 
-### Phase 1: Foundation ✅
+### Phase 1: Production-Ready HLS SSAI
 
-- [x] Project setup & HTTP server
-- [x] HLS playlist parsing
-- [x] Basic URL rewriting
-- [x] Segment proxying
-- [x] Environment-based config
-
-### Phase 2: Ad Insertion (In Progress)
-
-- [ ] Ad decision logic
-- [ ] Ad segment serving
-- [ ] Discontinuity tag handling
-- [ ] SCTE-35 marker support
-
-### Phase 3: Production Hardening
-
-- [ ] Session state management with cleanup
+- [x] HLS playlist parsing and URL rewriting
+- [x] SCTE-35 CUE-OUT/CUE-IN/CUE-OUT-CONT detection
+- [x] Ad interleaving with DISCONTINUITY tags
+- [x] Static ad provider (testing)
+- [x] VAST ad provider (VAST 2.0/3.0/4.0, wrapper chains)
+- [x] Session management with background cleanup
+- [x] Demo endpoint with real test segments
+- [x] JSON health check with diagnostics
+- [x] CORS middleware (dev/prod)
+- [ ] Slate management (fallback when no ads available)
 - [ ] Master playlist support
-- [ ] Metrics & monitoring
-- [ ] Rate limiting
-- [ ] Caching layer
+- [ ] Prometheus metrics
+- [ ] Error recovery with retry logic
+- [ ] Docker + Eyevinn OSC deployment
 
-### Phase 4: Deployment
+### Phase 2: DASH Support
 
-- [ ] Docker support
-- [ ] Kubernetes manifests
-- [ ] Performance benchmarks
-- [ ] Load testing
+- [ ] DASH MPD parsing and URL rewriting
+- [ ] Period-based ad insertion
+- [ ] CMAF segment support
 
----
+### Phase 3: Advanced
 
-## 🚧 Current Status
-
-**Early Development** - Core functionality working, ad insertion in progress.
-
-The stitcher can currently:
-
-- ✅ Fetch and parse HLS playlists from any origin
-- ✅ Rewrite segment URLs to route through Ritcher
-- ✅ Proxy video segments with full quality preservation
-- ⏳ Insert ads (coming next!)
+- [ ] Low-latency HLS (LL-HLS)
+- [ ] Server-Guided Ad Insertion (SGAI)
+- [ ] Ad tracking and beaconing
+- [ ] Per-viewer manifest personalization
 
 ---
 
-## 👨‍💻 Author
+## Why Ritcher?
+
+The SSAI market is growing at 20.3% CAGR toward $14.5B by 2033, yet **no production-ready open-source live SSAI stitcher exists**. Eyevinn's OSC ecosystem has Channel Engine for FAST channel creation but lacks a standalone ad stitching service. Ritcher fills that gap with Rust performance for the CPU-bound work of generating unique manifests per viewer.
+
+---
+
+## Author
 
 **Joel del Pilar** ([@JoeldelPilar](https://github.com/JoeldelPilar))
 
-Built as a learning project exploring Rust for high-performance video streaming.
+---
+
+## Acknowledgments
+
+Built on the shoulders of [Eyevinn Technology](https://www.eyevinntechnology.se/)'s open-source streaming ecosystem and designed for deployment on [Eyevinn Open Source Cloud](https://www.osaas.io).
 
 ---
 
-## 🙏 Inspiration
+## License
 
-Inspired by [Eyevinn Technology](https://www.eyevinntechnology.se/)'s work in video streaming and open-source contributions to the streaming community.
-
----
-
-## 📄 License
-
-MIT License - see [LICENSE](LICENCE) file for details
-
----
-
-## 🔗 Resources
-
-- [HLS Specification](https://datatracker.ietf.org/doc/html/rfc8216)
-- [Rust Async Book](https://rust-lang.github.io/async-book/)
-- [Axum Documentation](https://docs.rs/axum)
-- [m3u8-rs Documentation](https://docs.rs/m3u8-rs)
+MIT License — see [LICENSE](LICENCE) file for details.

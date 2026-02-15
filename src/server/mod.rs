@@ -16,6 +16,25 @@ pub async fn start(config: Config) -> Result<(), Box<dyn std::error::Error>> {
     // Create shared application state
     let state = AppState::new(config);
 
+    // Spawn background task for session cleanup (prevents memory leaks)
+    let cleanup_sessions = state.sessions.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            let before = cleanup_sessions.session_count();
+            cleanup_sessions.cleanup_expired();
+            let after = cleanup_sessions.session_count();
+            if before != after {
+                info!(
+                    "Session cleanup: removed {} expired sessions ({} active)",
+                    before - after,
+                    after
+                );
+            }
+        }
+    });
+
     // CORS layer: permissive in dev mode for testing with external players
     let cors = if is_dev {
         info!("CORS: Permissive mode (dev)");

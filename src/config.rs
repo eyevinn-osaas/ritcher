@@ -1,5 +1,14 @@
 use std::env;
 
+/// Ad provider selection
+#[derive(Clone, Debug, PartialEq)]
+pub enum AdProviderType {
+    /// Static ad provider using pre-configured segments (default for dev)
+    Static,
+    /// VAST-based ad provider fetching from an ad server
+    Vast,
+}
+
 /// Application configuration loaded from environment variables
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -7,8 +16,14 @@ pub struct Config {
     pub base_url: String,
     pub origin_url: String,
     pub is_dev: bool,
+    /// Ad provider type selection
+    pub ad_provider_type: AdProviderType,
+    /// Static ad source URL (used when ad_provider_type = Static)
     pub ad_source_url: String,
+    /// Static ad segment duration (used when ad_provider_type = Static)
     pub ad_segment_duration: f32,
+    /// VAST endpoint URL (used when ad_provider_type = Vast)
+    pub vast_endpoint: Option<String>,
 }
 
 impl Config {
@@ -46,12 +61,33 @@ impl Config {
             env::var("ORIGIN_URL").map_err(|_| "ORIGIN_URL is required in production")?
         };
 
-        // Ad source URL: defaults to test ad in dev
+        // VAST endpoint URL (optional)
+        let vast_endpoint = env::var("VAST_ENDPOINT").ok();
+
+        // Ad provider type: auto-detect from VAST_ENDPOINT or explicit AD_PROVIDER_TYPE
+        let ad_provider_type = match env::var("AD_PROVIDER_TYPE")
+            .unwrap_or_else(|_| "auto".to_string())
+            .to_lowercase()
+            .as_str()
+        {
+            "vast" => AdProviderType::Vast,
+            "static" => AdProviderType::Static,
+            _ => {
+                // Auto-detect: use VAST if endpoint is configured, otherwise static
+                if vast_endpoint.is_some() {
+                    AdProviderType::Vast
+                } else {
+                    AdProviderType::Static
+                }
+            }
+        };
+
+        // Static ad source URL: defaults to test ad stream
         let ad_source_url = env::var("AD_SOURCE_URL").unwrap_or_else(|_| {
             "https://hls.src.tedm.io/content/ts_h264_480p_1s".to_string()
         });
 
-        // Ad segment duration: defaults to 1 second
+        // Static ad segment duration: defaults to 1 second
         let ad_segment_duration = env::var("AD_SEGMENT_DURATION")
             .unwrap_or_else(|_| "1.0".to_string())
             .parse()
@@ -62,8 +98,10 @@ impl Config {
             base_url,
             origin_url,
             is_dev,
+            ad_provider_type,
             ad_source_url,
             ad_segment_duration,
+            vast_endpoint,
         })
     }
 }
