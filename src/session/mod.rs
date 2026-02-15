@@ -1,3 +1,3 @@
 pub mod manager;
 
-pub use manager::{Session, SessionManager};
+pub use manager::SessionManager;

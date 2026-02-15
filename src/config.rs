@@ -7,6 +7,8 @@ pub struct Config {
     pub base_url: String,
     pub origin_url: String,
     pub is_dev: bool,
+    pub ad_source_url: String,
+    pub ad_segment_duration: f32,
 }
 
 impl Config {
@@ -44,11 +46,24 @@ impl Config {
             env::var("ORIGIN_URL").map_err(|_| "ORIGIN_URL is required in production")?
         };
 
+        // Ad source URL: defaults to test ad in dev
+        let ad_source_url = env::var("AD_SOURCE_URL").unwrap_or_else(|_| {
+            "https://hls.src.tedm.io/content/ts_h264_480p_1s".to_string()
+        });
+
+        // Ad segment duration: defaults to 1 second
+        let ad_segment_duration = env::var("AD_SEGMENT_DURATION")
+            .unwrap_or_else(|_| "1.0".to_string())
+            .parse()
+            .unwrap_or(1.0);
+
         Ok(Config {
             port,
             base_url,
             origin_url,
             is_dev,
+            ad_source_url,
+            ad_segment_duration,
         })
     }
 }

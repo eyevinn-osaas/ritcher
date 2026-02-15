@@ -1,4 +1,4 @@
-use crate::{config::Config, session::SessionManager};
+use crate::{ad::StaticAdProvider, config::Config, session::SessionManager};
 use reqwest::Client;
 use std::sync::Arc;
 use std::time::Duration;
@@ -12,6 +12,8 @@ pub struct AppState {
     pub http_client: Client,
     /// Session manager for tracking active sessions
     pub sessions: SessionManager,
+    /// Ad provider for serving ad content
+    pub ad_provider: Arc<StaticAdProvider>,
 }
 
 impl AppState {
@@ -26,10 +28,17 @@ impl AppState {
         // Session TTL: 5 minutes
         let sessions = SessionManager::new(Duration::from_secs(300));
 
+        // Create ad provider from config
+        let ad_provider = Arc::new(StaticAdProvider::new(
+            config.ad_source_url.clone(),
+            config.ad_segment_duration,
+        ));
+
         Self {
             config: Arc::new(config),
             http_client,
             sessions,
+            ad_provider,
         }
     }
 }

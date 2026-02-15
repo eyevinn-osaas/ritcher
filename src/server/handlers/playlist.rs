@@ -1,9 +1,15 @@
-use crate::{error::Result, hls::parser, server::state::AppState};
+use crate::{
+    ad::{interleaver, AdProvider},
+    error::Result,
+    hls::{cue, parser},
+    server::state::AppState,
+};
 use axum::{
     extract::{Path, Query, State},
     http::{header, StatusCode},
     response::{IntoResponse, Response},
 };
+use m3u8_rs::Playlist;
 use std::collections::HashMap;
 use tracing::info;
 
@@ -43,15 +49,72 @@ pub async fn serve_playlist(
         .map(|(base, _)| base)
         .unwrap_or(origin_url);
 
-    // Modify playlist with stitcher URLs
-    let modified_playlist =
-        parser::modify_playlist(playlist, &session_id, &state.config.base_url, origin_base)?;
+    // Process playlist through the ad insertion pipeline
+    let modified_playlist = process_playlist(
+        playlist,
+        &session_id,
+        &state.config.base_url,
+        origin_base,
+        state.ad_provider.as_ref(),
+    )?;
+
+    // Serialize to string
+    let playlist_str = parser::serialize_playlist(modified_playlist)?;
 
     // Return playlist with proper Content-Type header
     Ok((
         StatusCode::OK,
         [(header::CONTENT_TYPE, "application/vnd.apple.mpegurl")],
-        modified_playlist,
+        playlist_str,
     )
         .into_response())
+}
+
+/// Process playlist through the ad insertion pipeline
+fn process_playlist(
+    playlist: Playlist,
+    session_id: &str,
+    base_url: &str,
+    origin_base: &str,
+    ad_provider: &dyn AdProvider,
+) -> Result<Playlist> {
+    // Only process MediaPlaylist (not MasterPlaylist)
+    let mut playlist = if let Playlist::MediaPlaylist(media_playlist) = playlist {
+        Playlist::MediaPlaylist(media_playlist)
+    } else {
+        return Ok(playlist);
+    };
+
+    // Step 1: Detect ad breaks from CUE tags
+    if let Playlist::MediaPlaylist(ref media_playlist) = playlist {
+        let ad_breaks = cue::detect_ad_breaks(media_playlist);
+
+        if !ad_breaks.is_empty() {
+            info!("Detected {} ad break(s)", ad_breaks.len());
+
+            // Step 2: Get ad segments for each break
+            let ad_segments_per_break: Vec<_> = ad_breaks
+                .iter()
+                .map(|ad_break| ad_provider.get_ad_segments(ad_break.duration, session_id))
+                .collect();
+
+            // Step 3: Interleave ads into playlist
+            if let Playlist::MediaPlaylist(media_playlist) = playlist {
+                playlist = Playlist::MediaPlaylist(interleaver::interleave_ads(
+                    media_playlist,
+                    &ad_breaks,
+                    &ad_segments_per_break,
+                    session_id,
+                    base_url,
+                ));
+            }
+        } else {
+            info!("No ad breaks detected in playlist");
+        }
+    }
+
+    // Step 4: Rewrite content URLs to proxy through stitcher
+    playlist = parser::rewrite_content_urls(playlist, session_id, base_url, origin_base)?;
+
+    Ok(playlist)
 }

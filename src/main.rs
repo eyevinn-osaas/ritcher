@@ -1,5 +1,6 @@
 use tracing::{error, info};
 
+mod ad;
 mod config;
 mod error;
 mod hls;
