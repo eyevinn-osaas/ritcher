@@ -71,6 +71,82 @@ pub fn rewrite_content_urls(
     Ok(playlist)
 }
 
+/// Rewrite master playlist variant-stream URLs to route through stitcher
+///
+/// Each variant stream's URI is rewritten to point to the stitcher's
+/// playlist endpoint, with the original variant URL passed as the `origin`
+/// query parameter. This ensures all quality levels are stitched.
+///
+/// Example transformation:
+/// - Input:  `720p/playlist.m3u8`
+/// - Output: `{base_url}/stitch/{session_id}/playlist.m3u8?origin={origin_base}/720p/playlist.m3u8`
+pub fn rewrite_master_urls(
+    mut playlist: Playlist,
+    session_id: &str,
+    base_url: &str,
+    origin_base: &str,
+) -> Result<Playlist> {
+    info!(
+        "Rewriting master playlist URLs for session: {}",
+        session_id
+    );
+
+    if let Playlist::MasterPlaylist(ref mut master) = playlist {
+        for variant in master.variants.iter_mut() {
+            let original_uri = variant.uri.clone();
+
+            // Resolve the variant URI to an absolute URL
+            let absolute_url = if variant.uri.starts_with("http") {
+                variant.uri.clone()
+            } else {
+                format!("{}/{}", origin_base, variant.uri)
+            };
+
+            // Rewrite to route through stitcher
+            variant.uri = format!(
+                "{}/stitch/{}/playlist.m3u8?origin={}",
+                base_url, session_id, absolute_url
+            );
+
+            info!(
+                "Rewrote variant: {} → {}",
+                original_uri, variant.uri
+            );
+        }
+
+        // Also rewrite alternative media URIs (audio, subtitle renditions)
+        for alt in master.alternatives.iter_mut() {
+            if let Some(ref mut uri) = alt.uri {
+                let original_uri = uri.clone();
+
+                let absolute_url = if uri.starts_with("http") {
+                    uri.clone()
+                } else {
+                    format!("{}/{}", origin_base, uri)
+                };
+
+                *uri = format!(
+                    "{}/stitch/{}/playlist.m3u8?origin={}",
+                    base_url, session_id, absolute_url
+                );
+
+                info!(
+                    "Rewrote alternative media: {} → {}",
+                    original_uri, uri
+                );
+            }
+        }
+
+        info!(
+            "Rewrote {} variant(s) and {} alternative(s) in master playlist",
+            master.variants.len(),
+            master.alternatives.len()
+        );
+    }
+
+    Ok(playlist)
+}
+
 /// Serialize playlist to string
 pub fn serialize_playlist(playlist: Playlist) -> Result<String> {
     let mut output = Vec::new();
@@ -81,4 +157,127 @@ pub fn serialize_playlist(playlist: Playlist) -> Result<String> {
     String::from_utf8(output).map_err(|e| {
         RitcherError::ConversionError(format!("Failed to convert playlist to UTF-8: {}", e))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use m3u8_rs::{AlternativeMedia, AlternativeMediaType, MasterPlaylist, VariantStream};
+
+    #[test]
+    fn test_rewrite_master_urls_relative() {
+        let playlist = Playlist::MasterPlaylist(MasterPlaylist {
+            variants: vec![
+                VariantStream {
+                    uri: "720p/playlist.m3u8".to_string(),
+                    bandwidth: 2_000_000,
+                    ..Default::default()
+                },
+                VariantStream {
+                    uri: "1080p/playlist.m3u8".to_string(),
+                    bandwidth: 5_000_000,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        });
+
+        let result = rewrite_master_urls(
+            playlist,
+            "session-1",
+            "http://stitcher.example.com",
+            "http://cdn.example.com/stream",
+        )
+        .unwrap();
+
+        if let Playlist::MasterPlaylist(master) = result {
+            assert_eq!(master.variants.len(), 2);
+            assert_eq!(
+                master.variants[0].uri,
+                "http://stitcher.example.com/stitch/session-1/playlist.m3u8?origin=http://cdn.example.com/stream/720p/playlist.m3u8"
+            );
+            assert_eq!(
+                master.variants[1].uri,
+                "http://stitcher.example.com/stitch/session-1/playlist.m3u8?origin=http://cdn.example.com/stream/1080p/playlist.m3u8"
+            );
+        } else {
+            panic!("Expected MasterPlaylist");
+        }
+    }
+
+    #[test]
+    fn test_rewrite_master_urls_absolute() {
+        let playlist = Playlist::MasterPlaylist(MasterPlaylist {
+            variants: vec![VariantStream {
+                uri: "http://other-cdn.example.com/720p/playlist.m3u8".to_string(),
+                bandwidth: 2_000_000,
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+
+        let result = rewrite_master_urls(
+            playlist,
+            "session-1",
+            "http://stitcher.example.com",
+            "http://cdn.example.com/stream",
+        )
+        .unwrap();
+
+        if let Playlist::MasterPlaylist(master) = result {
+            assert_eq!(
+                master.variants[0].uri,
+                "http://stitcher.example.com/stitch/session-1/playlist.m3u8?origin=http://other-cdn.example.com/720p/playlist.m3u8"
+            );
+        } else {
+            panic!("Expected MasterPlaylist");
+        }
+    }
+
+    #[test]
+    fn test_rewrite_master_urls_with_alternatives() {
+        let playlist = Playlist::MasterPlaylist(MasterPlaylist {
+            variants: vec![VariantStream {
+                uri: "video/playlist.m3u8".to_string(),
+                bandwidth: 2_000_000,
+                ..Default::default()
+            }],
+            alternatives: vec![AlternativeMedia {
+                media_type: AlternativeMediaType::Audio,
+                uri: Some("audio/en/playlist.m3u8".to_string()),
+                group_id: "audio".to_string(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+
+        let result = rewrite_master_urls(
+            playlist,
+            "session-1",
+            "http://stitcher.example.com",
+            "http://cdn.example.com/stream",
+        )
+        .unwrap();
+
+        if let Playlist::MasterPlaylist(master) = result {
+            assert_eq!(
+                master.alternatives[0].uri.as_deref().unwrap(),
+                "http://stitcher.example.com/stitch/session-1/playlist.m3u8?origin=http://cdn.example.com/stream/audio/en/playlist.m3u8"
+            );
+        } else {
+            panic!("Expected MasterPlaylist");
+        }
+    }
+
+    #[test]
+    fn test_parse_and_serialize_roundtrip() {
+        let m3u8_content = "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:10\n#EXTINF:10,\nseg0.ts\n#EXTINF:10,\nseg1.ts\n#EXT-X-ENDLIST\n";
+
+        let playlist = parse_hls_playlist(m3u8_content).unwrap();
+        let serialized = serialize_playlist(playlist).unwrap();
+
+        assert!(serialized.contains("#EXTM3U"));
+        assert!(serialized.contains("seg0.ts"));
+        assert!(serialized.contains("seg1.ts"));
+    }
 }

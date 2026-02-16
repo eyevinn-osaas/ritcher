@@ -24,6 +24,10 @@ pub struct Config {
     pub ad_segment_duration: f32,
     /// VAST endpoint URL (used when ad_provider_type = Vast)
     pub vast_endpoint: Option<String>,
+    /// Slate URL for fallback content when no ads are available
+    pub slate_url: Option<String>,
+    /// Slate segment duration in seconds (default: 1.0)
+    pub slate_segment_duration: f32,
 }
 
 impl Config {
@@ -93,6 +97,15 @@ impl Config {
             .parse()
             .unwrap_or(1.0);
 
+        // Slate URL: optional fallback content for empty ad breaks
+        let slate_url = env::var("SLATE_URL").ok();
+
+        // Slate segment duration: defaults to 1 second
+        let slate_segment_duration = env::var("SLATE_SEGMENT_DURATION")
+            .unwrap_or_else(|_| "1.0".to_string())
+            .parse()
+            .unwrap_or(1.0);
+
         Ok(Config {
             port,
             base_url,
@@ -102,6 +115,8 @@ impl Config {
             ad_source_url,
             ad_segment_duration,
             vast_endpoint,
+            slate_url,
+            slate_segment_duration,
         })
     }
 }

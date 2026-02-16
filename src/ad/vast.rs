@@ -86,11 +86,11 @@ pub fn parse_vast(xml: &str) -> Result<VastResponse> {
     loop {
         match reader.read_event() {
             Ok(Event::Start(ref e)) if e.name().as_ref() == b"VAST" => {
-                version = get_attr(&e, "version").unwrap_or_default();
+                version = get_attr(e, "version").unwrap_or_default();
                 info!("Parsing VAST version {}", version);
             }
             Ok(Event::Start(ref e)) if e.name().as_ref() == b"Ad" => {
-                let ad_id = get_attr(&e, "id").unwrap_or_default();
+                let ad_id = get_attr(e, "id").unwrap_or_default();
                 if let Some(ad) = parse_ad(&mut reader, ad_id)? {
                     ads.push(ad);
                 }
@@ -241,7 +241,7 @@ fn parse_creatives(reader: &mut Reader<&[u8]>) -> Result<Vec<Creative>> {
     loop {
         match reader.read_event() {
             Ok(Event::Start(ref e)) if e.name().as_ref() == b"Creative" => {
-                let id = get_attr(&e, "id").unwrap_or_default();
+                let id = get_attr(e, "id").unwrap_or_default();
                 let creative = parse_creative(reader, id)?;
                 creatives.push(creative);
             }
@@ -328,16 +328,16 @@ fn parse_media_files(reader: &mut Reader<&[u8]>) -> Result<Vec<MediaFile>> {
     loop {
         match reader.read_event() {
             Ok(Event::Start(ref e)) if e.name().as_ref() == b"MediaFile" => {
-                let delivery = get_attr(&e, "delivery").unwrap_or_default();
-                let mime_type = get_attr(&e, "type").unwrap_or_default();
-                let width = get_attr(&e, "width")
+                let delivery = get_attr(e, "delivery").unwrap_or_default();
+                let mime_type = get_attr(e, "type").unwrap_or_default();
+                let width = get_attr(e, "width")
                     .and_then(|s| s.parse().ok())
                     .unwrap_or(0);
-                let height = get_attr(&e, "height")
+                let height = get_attr(e, "height")
                     .and_then(|s| s.parse().ok())
                     .unwrap_or(0);
-                let bitrate = get_attr(&e, "bitrate").and_then(|s| s.parse().ok());
-                let codec = get_attr(&e, "codec");
+                let bitrate = get_attr(e, "bitrate").and_then(|s| s.parse().ok());
+                let codec = get_attr(e, "codec");
 
                 let url = read_text(reader, "MediaFile")?.trim().to_string();
 
@@ -373,7 +373,7 @@ fn parse_tracking_events(reader: &mut Reader<&[u8]>) -> Result<Vec<TrackingEvent
     loop {
         match reader.read_event() {
             Ok(Event::Start(ref e)) if e.name().as_ref() == b"Tracking" => {
-                let event = get_attr(&e, "event").unwrap_or_default();
+                let event = get_attr(e, "event").unwrap_or_default();
                 let url = read_text(reader, "Tracking")?.trim().to_string();
                 events.push(TrackingEvent { event, url });
             }

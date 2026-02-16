@@ -1,5 +1,8 @@
+use crate::ad::conditioning;
 use crate::ad::provider::{AdProvider, AdSegment};
+use crate::ad::slate::SlateProvider;
 use crate::ad::vast::{self, VastAdType};
+use crate::metrics;
 use dashmap::DashMap;
 use reqwest::Client;
 use std::sync::Arc;
@@ -35,6 +38,8 @@ pub struct VastAdProvider {
     max_wrapper_depth: u32,
     /// VAST request timeout
     timeout: Duration,
+    /// Optional slate provider for fallback when VAST returns no ads
+    slate: Option<SlateProvider>,
 }
 
 impl VastAdProvider {
@@ -50,7 +55,17 @@ impl VastAdProvider {
             ad_cache: Arc::new(DashMap::new()),
             max_wrapper_depth: 5,
             timeout: Duration::from_millis(2000),
+            slate: None,
         }
+    }
+
+    /// Configure a slate provider for fallback when VAST returns no ads
+    ///
+    /// When set, empty VAST responses or VAST failures will fall back to
+    /// serving slate segments instead of returning an empty ad break.
+    pub fn with_slate(mut self, slate: SlateProvider) -> Self {
+        self.slate = Some(slate);
+        self
     }
 
     /// Replace VAST macros in the endpoint URL
@@ -74,6 +89,7 @@ impl VastAdProvider {
         &self,
         url: &str,
         depth: u32,
+        session_id: &str,
     ) -> Option<Vec<(String, f32, bool)>> {
         if depth > self.max_wrapper_depth {
             warn!(
@@ -88,25 +104,42 @@ impl VastAdProvider {
         let timeout = self.timeout;
 
         // Run async reqwest within sync context using block_in_place
+        // Includes 1 retry with 500ms backoff on failure
         let xml = tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
-                let response = client
-                    .get(&url)
-                    .timeout(timeout)
-                    .send()
-                    .await;
+                let max_attempts = 2;
+                for attempt in 1..=max_attempts {
+                    let response = client
+                        .get(&url)
+                        .timeout(timeout)
+                        .send()
+                        .await;
 
-                match response {
-                    Ok(resp) if resp.status().is_success() => resp.text().await.ok(),
-                    Ok(resp) => {
-                        error!("VAST endpoint returned status {}", resp.status());
-                        None
+                    match response {
+                        Ok(resp) if resp.status().is_success() => {
+                            return resp.text().await.ok();
+                        }
+                        Ok(resp) => {
+                            error!(
+                                "VAST endpoint returned status {} (attempt {}/{})",
+                                resp.status(), attempt, max_attempts
+                            );
+                        }
+                        Err(e) => {
+                            error!(
+                                "VAST request failed: {} (attempt {}/{})",
+                                e, attempt, max_attempts
+                            );
+                        }
                     }
-                    Err(e) => {
-                        error!("VAST request failed: {}", e);
-                        None
+
+                    // Retry backoff (skip on last attempt)
+                    if attempt < max_attempts {
+                        warn!("Retrying VAST request in 500ms...");
+                        tokio::time::sleep(Duration::from_millis(500)).await;
                     }
                 }
+                None
             })
         })?;
 
@@ -124,10 +157,13 @@ impl VastAdProvider {
             match &ad.ad_type {
                 VastAdType::InLine(inline) => {
                     for creative in &inline.creatives {
-                        if let Some(linear) = &creative.linear {
-                            if let Some(media_file) =
+                        if let Some(linear) = &creative.linear
+                            && let Some(media_file) =
                                 vast::select_best_media_file(&linear.media_files)
                             {
+                                // Ad conditioning: check creative compatibility (warnings only)
+                                conditioning::check_creative(media_file, session_id);
+
                                 let is_hls =
                                     media_file.mime_type == "application/x-mpegURL";
                                 creatives.push((
@@ -136,13 +172,12 @@ impl VastAdProvider {
                                     is_hls,
                                 ));
                             }
-                        }
                     }
                 }
                 VastAdType::Wrapper(wrapper) => {
                     // Follow wrapper chain recursively
                     if let Some(mut wrapped_creatives) =
-                        self.fetch_vast(&wrapper.ad_tag_uri, depth + 1)
+                        self.fetch_vast(&wrapper.ad_tag_uri, depth + 1, session_id)
                     {
                         creatives.append(&mut wrapped_creatives);
                     }
@@ -151,6 +186,25 @@ impl VastAdProvider {
         }
 
         Some(creatives)
+    }
+
+    /// Generate slate fallback segments when VAST returns no ads
+    ///
+    /// Slate segments use "slate-seg-N.ts" naming to distinguish them
+    /// from regular VAST ad segments ("break-N-seg-M.ts").
+    fn slate_fallback(
+        &self,
+        slate: &SlateProvider,
+        duration: f32,
+        session_id: &str,
+    ) -> Vec<AdSegment> {
+        let segments = slate.fill_duration(duration, session_id);
+        info!(
+            "VastAdProvider: Slate fallback generated {} segments for session {}",
+            segments.len(),
+            session_id
+        );
+        segments
     }
 
     /// Build cache key for ad segment lookup
@@ -166,6 +220,7 @@ impl std::fmt::Debug for VastAdProvider {
             .field("max_wrapper_depth", &self.max_wrapper_depth)
             .field("timeout", &self.timeout)
             .field("cached_entries", &self.ad_cache.len())
+            .field("has_slate", &self.slate.is_some())
             .finish()
     }
 }
@@ -178,11 +233,41 @@ impl AdProvider for VastAdProvider {
             session_id, duration, url
         );
 
-        let creatives = match self.fetch_vast(&url, 0) {
-            Some(c) if !c.is_empty() => c,
-            _ => {
+        let creatives = match self.fetch_vast(&url, 0, session_id) {
+            Some(c) if !c.is_empty() => {
+                metrics::record_vast_request("success");
+                c
+            }
+            Some(_) => {
+                // VAST returned but with no creatives
+                metrics::record_vast_request("empty");
+                if let Some(slate) = &self.slate {
+                    warn!(
+                        "VastAdProvider: Empty VAST response for session {} — falling back to slate",
+                        session_id
+                    );
+                    metrics::record_slate_fallback();
+                    return self.slate_fallback(slate, duration, session_id);
+                }
                 warn!(
-                    "VastAdProvider: No creatives resolved for session {} — returning empty",
+                    "VastAdProvider: Empty VAST response for session {} and no slate configured",
+                    session_id
+                );
+                return Vec::new();
+            }
+            None => {
+                // VAST request failed
+                metrics::record_vast_request("error");
+                if let Some(slate) = &self.slate {
+                    warn!(
+                        "VastAdProvider: VAST failed for session {} — falling back to slate",
+                        session_id
+                    );
+                    metrics::record_slate_fallback();
+                    return self.slate_fallback(slate, duration, session_id);
+                }
+                warn!(
+                    "VastAdProvider: VAST failed for session {} and no slate configured",
                     session_id
                 );
                 return Vec::new();
@@ -222,6 +307,15 @@ impl AdProvider for VastAdProvider {
     }
 
     fn resolve_segment_url(&self, ad_name: &str) -> Option<String> {
+        // Check if this is a slate segment
+        if ad_name.starts_with("slate-seg-") {
+            if let Some(slate) = &self.slate {
+                return slate.resolve_segment_url(ad_name);
+            }
+            warn!("VastAdProvider: Slate segment requested but no slate configured");
+            return None;
+        }
+
         // Search across all sessions for this ad_name.
         // Ad names include break and segment indices, making them unique enough.
         for entry in self.ad_cache.iter() {

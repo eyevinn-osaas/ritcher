@@ -4,7 +4,7 @@
 
 Ritcher is a high-performance HLS stitcher built in Rust for Server-Side Ad Insertion (SSAI). It sits between the origin CDN and the player, dynamically inserting ads into live and VOD HLS streams by manipulating manifests and proxying segments.
 
-Designed to fill the gap in the [Eyevinn Open Source Cloud](https://www.osaas.io) ecosystem as a standalone live SSAI service downstream of [Channel Engine](https://github.com/Eyevinn/channel-engine).
+Ritcher runs as a standalone Docker container deployable anywhere. It integrates well with the [Eyevinn Open Source Cloud](https://www.osaas.io) ecosystem — particularly as a downstream stitcher for [Channel Engine](https://github.com/Eyevinn/channel-engine) — but has no platform dependencies.
 
 ---
 
@@ -13,12 +13,18 @@ Designed to fill the gap in the [Eyevinn Open Source Cloud](https://www.osaas.io
 - **SCTE-35 CUE tag detection** — Detects `EXT-X-CUE-OUT`, `EXT-X-CUE-IN`, and `EXT-X-CUE-OUT-CONT` markers in HLS playlists
 - **VAST ad provider** — Fetches and parses VAST 2.0/3.0/4.0 XML from any ad server, with wrapper chain support
 - **Static ad provider** — Built-in provider for testing with pre-configured ad segments
+- **Slate management** — Fallback filler content when VAST returns no ads or fails
 - **Ad interleaving** — Replaces content segments in ad break windows with ad segments, including proper `EXT-X-DISCONTINUITY` tags
-- **Segment proxying** — High-performance proxying for both content and ad segments
+- **Master playlist support** — Rewrites variant-stream URLs for multi-quality stitching
+- **Segment proxying** — High-performance proxying for content, ad, and slate segments with retry logic
 - **Session management** — Per-session stitching with automatic TTL-based cleanup
+- **Prometheus metrics** — `GET /metrics` endpoint with request counts, durations, VAST stats, and session gauges
+- **Ad conditioning** — Warning-level validation of ad creative compatibility (codec, resolution, MIME type)
+- **Error recovery** — Retry logic (1 retry, 500ms backoff) for VAST, origin, and ad segment fetches
 - **Demo endpoint** — Synthetic HLS playlist with real Mux test segments and CUE markers for testing
 - **JSON health check** — Structured diagnostics with version, session count, and uptime
 - **CORS support** — Permissive in dev mode, restrictive in production
+- **Docker ready** — Multi-stage Dockerfile for production deployment
 
 ---
 
@@ -37,9 +43,9 @@ Designed to fill the gap in the [Eyevinn Open Source Cloud](https://www.osaas.io
                     +--------+---------+
                              |
               +--------------+--------------+
-              |                             |
-        Origin CDN                    Ad Server
-     (content segments)            (VAST endpoint)
+              |              |              |
+        Origin CDN      Ad Server      Slate Source
+     (content segs)   (VAST endpoint)  (fallback video)
 ```
 
 ---
@@ -72,6 +78,28 @@ VAST_ENDPOINT="http://localhost:8080/api/v1/vast?dur=[DURATION]" \
 cargo run
 ```
 
+### With Slate Fallback
+
+```bash
+# VAST mode with slate fallback when ads unavailable
+DEV_MODE=true \
+VAST_ENDPOINT="http://localhost:8080/api/v1/vast?dur=[DURATION]" \
+SLATE_URL="https://hls.src.tedm.io/content/ts_h264_480p_1s" \
+cargo run
+```
+
+### Docker
+
+```bash
+docker build -t ritcher .
+
+docker run -p 3000:3000 \
+  -e PORT=3000 \
+  -e BASE_URL=https://stitcher.example.com \
+  -e VAST_ENDPOINT=https://ads.example.com/vast \
+  ritcher
+```
+
 ### Production
 
 ```bash
@@ -79,6 +107,7 @@ PORT=3000 \
 BASE_URL=https://stitcher.example.com \
 ORIGIN_URL=https://cdn.example.com/stream/playlist.m3u8 \
 VAST_ENDPOINT=https://ads.example.com/vast \
+SLATE_URL=https://slate.example.com/content \
 cargo run --release
 ```
 
@@ -89,6 +118,7 @@ cargo run --release
 | Endpoint | Description |
 |----------|-------------|
 | `GET /health` | JSON health check (`{ status, version, active_sessions, uptime_seconds }`) |
+| `GET /metrics` | Prometheus metrics in text exposition format |
 | `GET /demo/playlist.m3u8` | Demo HLS playlist with CUE markers |
 | `GET /stitch/{session_id}/playlist.m3u8?origin={url}` | Stitched playlist with ad insertion |
 | `GET /stitch/{session_id}/segment/{*path}?origin={base}` | Proxied content segment |
@@ -105,11 +135,29 @@ cargo run --release
 | `BASE_URL` | Stitcher's public URL | Prod only | `http://localhost:3000` |
 | `ORIGIN_URL` | Default origin playlist URL | Prod only | — |
 | `AD_PROVIDER_TYPE` | `vast`, `static`, or `auto` | No | `auto` |
-| `VAST_ENDPOINT` | VAST ad server URL | For VAST mode | — |
+| `VAST_ENDPOINT` | VAST ad server URL (supports `[DURATION]` and `[CACHEBUSTING]` macros) | For VAST mode | — |
+| `SLATE_URL` | Slate fallback content URL | No | — |
+| `SLATE_SEGMENT_DURATION` | Slate segment duration (seconds) | No | `1.0` |
 | `AD_SOURCE_URL` | Static ad segment source | For static mode | tedm.io test stream |
 | `AD_SEGMENT_DURATION` | Static ad segment duration (seconds) | No | `1.0` |
 
 **Auto-detection**: When `AD_PROVIDER_TYPE=auto` (default), Ritcher uses VAST if `VAST_ENDPOINT` is set, otherwise falls back to static.
+
+---
+
+## Metrics
+
+Prometheus metrics available at `GET /metrics`:
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `ritcher_requests_total` | Counter | Total requests by endpoint and status |
+| `ritcher_request_duration_seconds` | Histogram | Request duration by endpoint |
+| `ritcher_active_sessions` | Gauge | Currently active sessions |
+| `ritcher_ad_breaks_detected` | Counter | Ad breaks detected across all requests |
+| `ritcher_vast_requests_total` | Counter | VAST requests by result (success/error/empty) |
+| `ritcher_slate_fallbacks_total` | Counter | Slate fallback activations |
+| `ritcher_origin_fetch_errors_total` | Counter | Origin fetch errors |
 
 ---
 
@@ -122,6 +170,7 @@ cargo run --release
 - **quick-xml** — VAST XML parsing
 - **reqwest** — HTTP client with connection pooling
 - **DashMap** — Lock-free concurrent session storage
+- **metrics + metrics-exporter-prometheus** — Prometheus observability
 - **tower-http** — CORS middleware
 - **tracing** — Structured logging
 
@@ -130,7 +179,7 @@ cargo run --release
 ## Testing
 
 ```bash
-# Run all tests (30 tests)
+# Run all tests (46 tests)
 cargo test
 
 # Run with logging
@@ -155,11 +204,12 @@ cargo clippy
 - [x] Demo endpoint with real test segments
 - [x] JSON health check with diagnostics
 - [x] CORS middleware (dev/prod)
-- [ ] Slate management (fallback when no ads available)
-- [ ] Master playlist support
-- [ ] Prometheus metrics
-- [ ] Error recovery with retry logic
-- [ ] Docker + Eyevinn OSC deployment
+- [x] Slate management (fallback when no ads available)
+- [x] Master playlist support
+- [x] Prometheus metrics
+- [x] Error recovery with retry logic
+- [x] Ad conditioning (warning-level creative validation)
+- [x] Docker deployment
 
 ### Phase 2: DASH Support
 
@@ -178,7 +228,7 @@ cargo clippy
 
 ## Why Ritcher?
 
-The SSAI market is growing at 20.3% CAGR toward $14.5B by 2033, yet **no production-ready open-source live SSAI stitcher exists**. Eyevinn's OSC ecosystem has Channel Engine for FAST channel creation but lacks a standalone ad stitching service. Ritcher fills that gap with Rust performance for the CPU-bound work of generating unique manifests per viewer.
+The SSAI market is growing at 20.3% CAGR toward $14.5B by 2033, yet **no production-ready open-source live SSAI stitcher exists**. Ritcher fills that gap with Rust performance for the CPU-bound work of generating unique manifests per viewer. It works with any VAST-compatible ad server and any HLS origin — deploy it on [Eyevinn Open Source Cloud](https://www.osaas.io) for a turnkey setup with Channel Engine, or run it standalone anywhere Docker runs.
 
 ---
 
@@ -190,7 +240,7 @@ The SSAI market is growing at 20.3% CAGR toward $14.5B by 2033, yet **no product
 
 ## Acknowledgments
 
-Built on the shoulders of [Eyevinn Technology](https://www.eyevinntechnology.se/)'s open-source streaming ecosystem and designed for deployment on [Eyevinn Open Source Cloud](https://www.osaas.io).
+Built on the shoulders of [Eyevinn Technology](https://www.eyevinntechnology.se/)'s open-source streaming ecosystem. [Eyevinn Open Source Cloud](https://www.osaas.io) is the recommended deployment platform for a managed experience, but Ritcher runs anywhere.
 
 ---
 

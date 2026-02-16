@@ -1,5 +1,5 @@
 use crate::{
-    ad::{AdProvider, StaticAdProvider, VastAdProvider},
+    ad::{AdProvider, SlateProvider, StaticAdProvider, VastAdProvider},
     config::{AdProviderType, Config},
     session::SessionManager,
 };
@@ -43,10 +43,27 @@ impl AppState {
                     .as_deref()
                     .expect("VAST_ENDPOINT is required when AD_PROVIDER_TYPE=vast");
                 info!("Ad provider: VAST (endpoint: {})", endpoint);
-                Arc::new(VastAdProvider::new(
+
+                let mut provider = VastAdProvider::new(
                     endpoint.to_string(),
                     http_client.clone(),
-                ))
+                );
+
+                // Configure slate fallback if SLATE_URL is set
+                if let Some(slate_url) = &config.slate_url {
+                    info!(
+                        "Slate fallback: enabled (url: {}, segment duration: {}s)",
+                        slate_url, config.slate_segment_duration
+                    );
+                    provider = provider.with_slate(SlateProvider::new(
+                        slate_url.clone(),
+                        config.slate_segment_duration,
+                    ));
+                } else {
+                    info!("Slate fallback: disabled (no SLATE_URL configured)");
+                }
+
+                Arc::new(provider)
             }
             AdProviderType::Static => {
                 info!(

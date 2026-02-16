@@ -4,6 +4,7 @@ mod ad;
 mod config;
 mod error;
 mod hls;
+mod metrics;
 mod server;
 mod session;
 

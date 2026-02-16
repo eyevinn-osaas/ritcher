@@ -2,6 +2,7 @@ use crate::{
     ad::{interleaver, AdProvider},
     error::Result,
     hls::{cue, parser},
+    metrics,
     server::state::AppState,
 };
 use axum::{
@@ -11,6 +12,7 @@ use axum::{
 };
 use m3u8_rs::Playlist;
 use std::collections::HashMap;
+use std::time::Instant;
 use tracing::info;
 
 /// Serve modified HLS playlist with stitched ad markers
@@ -19,6 +21,7 @@ pub async fn serve_playlist(
     Query(params): Query<HashMap<String, String>>,
     State(state): State<AppState>,
 ) -> Result<Response> {
+    let start = Instant::now();
     info!("Serving playlist for session: {}", session_id);
 
     // Get origin URL from query params or fallback to config
@@ -30,9 +33,15 @@ pub async fn serve_playlist(
     info!("Fetching playlist from origin: {}", origin_url);
 
     // Fetch playlist from origin using shared HTTP client
-    let response = state.http_client.get(origin_url).send().await?;
+    let response = state.http_client.get(origin_url).send().await.map_err(|e| {
+        metrics::record_origin_error();
+        crate::error::RitcherError::OriginFetchError(e)
+    })?;
 
     if !response.status().is_success() {
+        metrics::record_origin_error();
+        metrics::record_request("playlist", 502);
+        metrics::record_duration("playlist", start);
         return Err(crate::error::RitcherError::OriginFetchError(
             response.error_for_status().unwrap_err(),
         ));
@@ -61,6 +70,9 @@ pub async fn serve_playlist(
     // Serialize to string
     let playlist_str = parser::serialize_playlist(modified_playlist)?;
 
+    metrics::record_request("playlist", 200);
+    metrics::record_duration("playlist", start);
+
     // Return playlist with proper Content-Type header
     Ok((
         StatusCode::OK,
@@ -78,7 +90,13 @@ fn process_playlist(
     origin_base: &str,
     ad_provider: &dyn AdProvider,
 ) -> Result<Playlist> {
-    // Only process MediaPlaylist (not MasterPlaylist)
+    // Handle MasterPlaylist: rewrite variant-stream URLs through stitcher
+    if matches!(&playlist, Playlist::MasterPlaylist(_)) {
+        info!("Processing master playlist — rewriting variant URLs");
+        return parser::rewrite_master_urls(playlist, session_id, base_url, origin_base);
+    }
+
+    // MediaPlaylist: full ad insertion pipeline
     let Playlist::MediaPlaylist(mut media_playlist) = playlist else {
         return Ok(playlist);
     };
@@ -88,6 +106,7 @@ fn process_playlist(
 
     if !ad_breaks.is_empty() {
         info!("Detected {} ad break(s)", ad_breaks.len());
+        metrics::record_ad_breaks(ad_breaks.len());
 
         // Step 2: Get ad segments for each break
         let ad_segments_per_break: Vec<_> = ad_breaks

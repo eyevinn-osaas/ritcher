@@ -3,6 +3,7 @@ pub mod state;
 
 use crate::config::Config;
 use axum::{routing::get, Router};
+use metrics_exporter_prometheus::PrometheusBuilder;
 use state::AppState;
 use tower_http::cors::{Any, CorsLayer};
 use tracing::{error, info};
@@ -12,6 +13,12 @@ pub async fn start(config: Config) -> Result<(), Box<dyn std::error::Error>> {
     let addr = format!("0.0.0.0:{}", config.port);
     let port = config.port;
     let is_dev = config.is_dev;
+
+    // Install Prometheus metrics recorder
+    let prometheus_handle = PrometheusBuilder::new()
+        .install_recorder()
+        .expect("Failed to install Prometheus recorder");
+    info!("Prometheus metrics recorder installed");
 
     // Create shared application state
     let state = AppState::new(config);
@@ -32,6 +39,8 @@ pub async fn start(config: Config) -> Result<(), Box<dyn std::error::Error>> {
                     after
                 );
             }
+            // Update session gauge metric
+            crate::metrics::set_active_sessions(after);
         }
     });
 
@@ -52,6 +61,14 @@ pub async fn start(config: Config) -> Result<(), Box<dyn std::error::Error>> {
     let app = Router::new()
         .route("/", get(handlers::health::health_check))
         .route("/health", get(handlers::health::health_check))
+        // Prometheus metrics endpoint
+        .route(
+            "/metrics",
+            get({
+                let handle = prometheus_handle.clone();
+                move || handlers::metrics::serve_metrics(handle)
+            }),
+        )
         // Demo endpoint: synthetic playlist with CUE markers for testing
         .route(
             "/demo/playlist.m3u8",
@@ -82,12 +99,13 @@ pub async fn start(config: Config) -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    info!("🚀 Server listening on http://{}", addr);
-    info!("📺 Demo playlist: http://{}/demo/playlist.m3u8", addr);
+    info!("Server listening on http://{}", addr);
+    info!("Demo playlist: http://{}/demo/playlist.m3u8", addr);
     info!(
-        "🔗 Stitched demo: http://{}/stitch/demo/playlist.m3u8?origin=http://localhost:{}/demo/playlist.m3u8",
+        "Stitched demo: http://{}/stitch/demo/playlist.m3u8?origin=http://localhost:{}/demo/playlist.m3u8",
         addr, port
     );
+    info!("Metrics: http://{}/metrics", addr);
 
     // Start serving
     if let Err(e) = axum::serve(listener, app).await {
