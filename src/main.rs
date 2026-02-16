@@ -1,12 +1,5 @@
+use ritcher::{config, server};
 use tracing::{error, info};
-
-mod ad;
-mod config;
-mod error;
-mod hls;
-mod metrics;
-mod server;
-mod session;
 
 #[tokio::main]
 async fn main() {
