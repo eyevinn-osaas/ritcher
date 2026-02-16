@@ -178,7 +178,7 @@ Ritcher's pipeline (parse → detect CUE breaks → interleave ads → rewrite U
 
 VAST XML parsing adds ~18 µs per ad pod (3 ads, 3 media files each), though in production this is cached per ad break rather than per viewer.
 
-Run benchmarks yourself:
+See [BENCHMARK.md](BENCHMARK.md) for detailed results, methodology, and scaling analysis. Run benchmarks yourself:
 
 ```bash
 cargo bench
